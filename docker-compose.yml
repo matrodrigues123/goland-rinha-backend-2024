@@ -7,26 +7,21 @@ services:
     build: 
       context: .
     hostname: api01
-    # environment:
-    #   - DB_HOSTNAME=db
     
     # Não é necessário expor qualquer porta além da porta do load balancer,
     # mas é comum as pessoas o fazerem para testarem suas APIs e conectarem
     # ao banco de dados na fase de desenvolvimento.
-    # depends_on:
-    #   - db
+    depends_on:
+      - db
     deploy:
       resources:
         limits:
-          cpus: "0.25"
-          memory: "200MB"
+          cpus: "0.37"
+          memory: "55MB"
 
   api02:
-    # Essa sintaxe reusa o que foi declarado em 'api01'.
     <<: *api 
     hostname: api02
-    # environment:
-    #   - DB_HOSTNAME=db
  
   nginx:
     image: nginx:latest
@@ -41,29 +36,29 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1"
-          memory: "10MB"
+          cpus: "0.2"
+          memory: "30MB"
 
-#   db:
-#     image: postgres:latest
-#     hostname: db
-#     environment:
-#       - POSTGRES_PASSWORD=123
-#       - POSTGRES_USER=admin
-#       - POSTGRES_DB=rinha
-#     ports:
-#       - "5432:5432"
-#     volumes:
-#       - ./script.sql:/docker-entrypoint-initdb.d/script.sql
-#     deploy:
-#       resources:
-#         limits:
-#           # Note que a soma de todos os limites dos serviços
-#           # aqui declarados é de 1.5 unidades de CPU e 550MB
-#           # de memória. A distribuição feita aqui é apenas
-#           # um exemplo – distribua como quiser.
-#           cpus: "0.13"
-#           memory: "140MB"
+  db:
+    image: postgres:latest
+    hostname: db
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=rinha-db
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          # Note que a soma de todos os limites dos serviços
+          # aqui declarados é de 1.5 unidades de CPU e 550MB
+          # de memória. A distribuição feita aqui é apenas
+          # um exemplo – distribua como quiser.
+          cpus: "0.56"
+          memory: "410MB"
 
 # O uso do modo `bridge` deve ser adequado à carga que será usada no teste.
 # A edição anterior se beneficiou do modo host pois o volume de requisições

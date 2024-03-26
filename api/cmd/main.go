@@ -6,71 +6,36 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
+	"github.com/matrodrigues123/rinha-2024-go-api/database"
 	"github.com/matrodrigues123/rinha-2024-go-api/models"
 )
 
 
-
 func main() {
-
 	// defininig time zone
 	loc, _ := time.LoadLocation("America/Sao_Paulo")
 	time.Local = loc
 
-	// in memory db
-	db := map[int]*models.Account{
-		1: {
-			Balance: models.Balance{
-				Limit:        1e5,
-				Total: 0,
-			},
-			Transactions: []models.Transaction{},
-		},
-		2: {
-			Balance: models.Balance{
-				Limit:        8e4,
-				Total: 0,
-			},
-			Transactions: []models.Transaction{},
-		},
-		3: {
-			Balance: models.Balance{
-				Limit:        1e6,
-				Total: 0,
-			},
-			Transactions: []models.Transaction{},
-		},
-		4: {
-			Balance: models.Balance{
-				Limit:        1e7,
-				Total: 0,
-			},
-			Transactions: []models.Transaction{},
-		},
-		5: {
-			Balance: models.Balance{
-				Limit:        5e5,
-				Total: 0,
-			},
-			Transactions: []models.Transaction{},
-		},
-	}
+	// postgres db
+	db_postgres := database.Connection()
 	
 	r := gin.Default()
   
   	r.POST("/clientes/:id/transacoes", func (c *gin.Context) {
-		postTransaction(c, db)
+		postTransaction(c, db_postgres)
 	})
   	r.GET("/clientes/:id/extrato", func (c *gin.Context) {
-		getBalance(c, db)
+		getBalance(c, db_postgres)
 	})
   
   	r.Run(":3000")
     
 }
 
-func postTransaction(c *gin.Context, db map[int]*models.Account) {
+func postTransaction(c *gin.Context, db *gorm.DB) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
@@ -78,48 +43,69 @@ func postTransaction(c *gin.Context, db map[int]*models.Account) {
 		return
 	}
 
-	var newTransaction models.Transaction
-	if err := c.BindJSON(&newTransaction); err != nil {
+	var newTransactionRequest models.TransactionRequest
+	if err := c.BindJSON(&newTransactionRequest); err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
         return
     }
 	
-	account, ok := db[id]
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+	tx := db.Begin()
+	
+	var account models.Account
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&account, id).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "Account not found."})
 		return
 	}
-	account.Mutex.Lock()
-	defer account.Mutex.Unlock()
 
-	switch newTransaction.Type {
+	switch newTransactionRequest.Type {
 	case "d":
-		newTotal := account.Balance.Total - newTransaction.Value
-		if (newTotal + account.Balance.Limit < 0) {
+		newTotal := account.Total - newTransactionRequest.Value
+		if (newTotal + account.Limit < 0) {
+			tx.Rollback()
 			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "Invalid debit operation"})
 			return
 		}
-		account.Balance.Total = newTotal
+		account.Total = newTotal
 	case "c":
-		account.Balance.Total += newTransaction.Value
+		account.Total += newTransactionRequest.Value
 	default:
+		tx.Rollback()
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "Operation must be c or d"})
 		return
 	}
 
-	newTransaction.CreatedAt = time.Now()
-	account.Transactions = append([]models.Transaction{newTransaction}, account.Transactions...)
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Save(&account).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update account balance."})
+		return
+	}
+
+	newTransaction := models.Transaction{
+		AccountID: account.ID,
+		Value: newTransactionRequest.Value,
+		Type: newTransactionRequest.Type,
+		Description: newTransactionRequest.Description,
+	}
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Create(&newTransaction).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record new transaction."})
+		return
+	}
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Commit().Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction commit failed."})
+		return
+	}
 
 	response := gin.H{
-		"limite": account.Balance.Limit,
-		"saldo":  account.Balance.Total,
+		"limite": account.Limit,
+		"saldo":  account.Total,
 	}
 
 	c.JSON(http.StatusOK, response)
-
 }
 
-func getBalance(c *gin.Context, db map[int]*models.Account)  {
+func getBalance(c *gin.Context, db *gorm.DB)  {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
@@ -127,15 +113,34 @@ func getBalance(c *gin.Context, db map[int]*models.Account)  {
 		return
 	}
 
-	account, ok := db[id]
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found."})
+	var account models.Account
+    
+	if err := db.Clauses(clause.Locking{Strength: "SHARE"}).First(&account, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid ID or Account not found."})
 		return
 	}
-	account.Mutex.RLock()
-	defer account.Mutex.RUnlock()
 
-	account.Balance.UpdatedAt = time.Now()
+	var transactions []models.Transaction
+	if err := db.Clauses(clause.Locking{Strength: "SHARE"}).
+		Select("value, type, description, created_at").
+		Where("account_id = ?", account.ID).
+		Order("created_at desc").
+		Limit(10).
+		Find(&transactions).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Couldnt find transactions"})
+			return
+		}
 	
-	c.JSON(http.StatusOK, account)
+
+	response := gin.H{
+        "saldo": gin.H{
+            "limite":     account.Limit,
+            "total":      account.Total,
+            "data_extrato": time.Now(),
+        },
+        "ultimas_transacoes": transactions,
+    }
+
+    c.JSON(http.StatusOK, response)
+
 }
